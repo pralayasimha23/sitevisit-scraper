@@ -1,18 +1,25 @@
 import { chromium } from "playwright";
 import fetch from "node-fetch";
+import fs from "fs";
 
 /* ================= ENV ================= */
 const EMAIL = process.env.PORTAL_EMAIL;
 const PASSWORD = process.env.PORTAL_PASSWORD;
 const VIASOCKET_WEBHOOK = process.env.VIASOCKET_WEBHOOK;
 
+console.log("🔧 ENV CHECK", {
+  PORTAL_EMAIL: !!EMAIL,
+  PORTAL_PASSWORD: !!PASSWORD,
+  VIASOCKET_WEBHOOK: !!VIASOCKET_WEBHOOK
+});
+
 if (!EMAIL || !PASSWORD || !VIASOCKET_WEBHOOK) {
-  throw new Error("Missing environment variables");
+  throw new Error("❌ Missing environment variables");
 }
 
 /* ================= HELPERS ================= */
 
-// Browser uses MM/DD/YYYY
+// IMPORTANT: UI uses MM/DD/YYYY
 const formatDate = (d) => {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
@@ -20,12 +27,14 @@ const formatDate = (d) => {
   return `${mm}/${dd}/${yyyy}`;
 };
 
-// last 30 days (same behavior as UI)
+// Last 30 days
 const startDate = formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
 const endDate = formatDate(new Date());
 const DATE_FILTER = `${startDate} - ${endDate}`;
 
-// normalize for Viasocket / Sheets
+console.log("📅 DATE_FILTER:", DATE_FILTER);
+
+// Normalize values
 const normalize = (v) => {
   if (v === null || v === undefined) return "";
   if (typeof v === "object") return "";
@@ -39,8 +48,11 @@ const normalize = (v) => {
     viewport: { width: 1280, height: 800 }
   });
 
+  let finalRows = [];
+
   try {
     /* ========= LOGIN ========= */
+    console.log("🔐 Opening portal...");
     await page.goto("https://svform.urbanriseprojects.in/", {
       waitUntil: "domcontentloaded",
       timeout: 60000
@@ -58,18 +70,22 @@ const normalize = (v) => {
       (await page.$('button:has-text("Sign In")')) ||
       (await page.$('button'));
 
-    if (!loginBtn) throw new Error("Login button not found");
+    if (!loginBtn) throw new Error("❌ Login button not found");
 
     await loginBtn.click();
     await page.waitForLoadState("networkidle", { timeout: 60000 });
 
+    console.log("✅ Login successful");
+
     /* ========= COOKIES ========= */
     const cookies = await page.context().cookies();
+    console.log("🍪 Cookies:", cookies.map(c => c.name));
+
     const xsrf = cookies.find(c => c.name === "XSRF-TOKEN");
     const session = cookies.find(c => c.name === "sv_forms_session");
 
     if (!xsrf || !session) {
-      throw new Error("Auth cookies not found");
+      throw new Error("❌ Required auth cookies missing");
     }
 
     const XSRF_TOKEN = decodeURIComponent(xsrf.value);
@@ -77,9 +93,18 @@ const normalize = (v) => {
 
     /* ========= FETCH DATA ========= */
     let pageNo = 1;
-    let finalRows = [];
 
     while (true) {
+      console.log(`📡 Fetching page ${pageNo}`);
+
+      const apiPayload = {
+        searchBy: "contact",
+        dateFilter: DATE_FILTER,
+        project: 13
+      };
+
+      console.log("➡️ API PAYLOAD:", apiPayload);
+
       const res = await page.request.post(
         `https://svform.urbanriseprojects.in/leadList?page=${pageNo}`,
         {
@@ -88,39 +113,32 @@ const normalize = (v) => {
             "X-XSRF-TOKEN": XSRF_TOKEN,
             "Cookie": `XSRF-TOKEN=${XSRF_TOKEN}; sv_forms_session=${SESSION}`
           },
-          data: {
-            searchBy: "contact",
-            dateFilter: DATE_FILTER, // MUST MATCH UI
-            project: 13
-          }
+          data: apiPayload
         }
       );
 
-      if (!res.ok()) {
-        throw new Error(`API failed on page ${pageNo}`);
-      }
+      console.log("⬅️ API STATUS:", res.status());
 
       const json = await res.json();
       const rows = Object.values(json.data || {});
 
-      console.log(`Page ${pageNo}: ${rows.length} records`);
+      console.log(`📦 Records on page ${pageNo}:`, rows.length);
+
+      if (rows.length && pageNo === 1) {
+        console.log("🧪 Sample record:", rows[0]);
+      }
 
       for (const r of rows) {
         finalRows.push({
           recent_site_visit_date: normalize(r.recent_date),
           name: normalize(r.first_name),
-          contact: normalize(r.contact), // full number (UI masks)
+          contact: normalize(r.contact),
           lead_source: normalize(r.lead_source),
           lead_sub_source: normalize(r.lead_sub_source),
           lead_stage: normalize(r.lead_stage),
           lead_number: normalize(r.lead_number),
-          status: normalize(r.status),
           created_at: normalize(r.created_at),
-          updated_at: normalize(r.updated_at),
-          site_visit_count: normalize(r.site_visit_count),
-          total_time: normalize(r.total_time),
-          is_qr: normalize(r.is_qr),
-          raw_lead_id: normalize(r.lead_id)
+          updated_at: normalize(r.updated_at)
         });
       }
 
@@ -128,8 +146,27 @@ const normalize = (v) => {
       pageNo++;
     }
 
+    console.log("📊 TOTAL RECORDS COLLECTED:", finalRows.length);
+
+    /* ========= SAVE PAYLOAD PREVIEW ========= */
+    const previewPayload = {
+      source: "urbanrise_portal",
+      date_filter: DATE_FILTER,
+      total_records: finalRows.length,
+      records: finalRows.slice(0, 5)
+    };
+
+    fs.writeFileSync(
+      "viasocket_payload_preview.json",
+      JSON.stringify(previewPayload, null, 2)
+    );
+
+    console.log("📝 Saved viasocket_payload_preview.json");
+
     /* ========= SEND TO VIASOCKET ========= */
-    await fetch(VIASOCKET_WEBHOOK, {
+    console.log("🚀 Sending data to Viasocket...");
+
+    const vsRes = await fetch(VIASOCKET_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -141,9 +178,12 @@ const normalize = (v) => {
       })
     });
 
-    console.log(`✅ SUCCESS: Sent ${finalRows.length} records to Viasocket`);
+    console.log("📬 Viasocket status:", vsRes.status);
+    console.log("📬 Viasocket response:", await vsRes.text());
+
+    console.log("✅ SCRIPT COMPLETED SUCCESSFULLY");
   } catch (err) {
-    console.error("❌ ERROR:", err.message);
+    console.error("❌ SCRIPT ERROR:", err.message);
     await page.screenshot({ path: "error.png", fullPage: true });
     throw err;
   } finally {
