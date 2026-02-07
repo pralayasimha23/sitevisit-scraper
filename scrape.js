@@ -6,70 +6,62 @@ const PASSWORD = process.env.PORTAL_PASSWORD;
 const VIASOCKET_WEBHOOK = process.env.VIASOCKET_WEBHOOK;
 
 if (!EMAIL || !PASSWORD || !VIASOCKET_WEBHOOK) {
-  throw new Error("Missing required environment variables");
+  throw new Error("Missing environment variables");
 }
 
-(async () => {
-  const browser = await chromium.launch({
-    headless: true
-  });
+// Normalize values for Viasocket / Sheets
+const normalize = (v) => {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object") return "";
+  return String(v).trim();
+};
 
-  const page = await browser.newPage({
-    viewport: { width: 1280, height: 800 }
-  });
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
   try {
-    // 1️⃣ Open login page
+    /* ================= LOGIN ================= */
     await page.goto("https://svform.urbanriseprojects.in/", {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
-    // 2️⃣ Wait for login inputs
     await page.waitForSelector('input[type="password"]', { timeout: 60000 });
 
-    // 3️⃣ Fill credentials
     await page.fill('input[type="email"], input[name="email"]', EMAIL);
     await page.fill('input[type="password"]', PASSWORD);
 
-    // Small delay helps in CI
     await page.waitForTimeout(2000);
 
-    // 4️⃣ Click login button (robust)
-    const loginButton =
+    const loginBtn =
       (await page.$('button:has-text("Login")')) ||
       (await page.$('button:has-text("Sign In")')) ||
-      (await page.$('button:has-text("Submit")')) ||
       (await page.$('button'));
 
-    if (!loginButton) {
-      throw new Error("Login button not found");
-    }
+    if (!loginBtn) throw new Error("Login button not found");
 
-    await loginButton.click();
-
-    // 5️⃣ Wait for authenticated state
+    await loginBtn.click();
     await page.waitForLoadState("networkidle", { timeout: 60000 });
 
-    // 6️⃣ Extract cookies
+    /* ================= AUTH COOKIES ================= */
     const cookies = await page.context().cookies();
+    const xsrf = cookies.find(c => c.name === "XSRF-TOKEN");
+    const session = cookies.find(c => c.name === "sv_forms_session");
 
-    const xsrfCookie = cookies.find(c => c.name === "XSRF-TOKEN");
-    const sessionCookie = cookies.find(c => c.name === "sv_forms_session");
-
-    if (!xsrfCookie || !sessionCookie) {
-      throw new Error("Auth cookies not found");
+    if (!xsrf || !session) {
+      throw new Error("Auth cookies missing");
     }
 
-    const XSRF_TOKEN = decodeURIComponent(xsrfCookie.value);
-    const SESSION = sessionCookie.value;
+    const XSRF_TOKEN = decodeURIComponent(xsrf.value);
+    const SESSION = session.value;
 
-    // 7️⃣ Fetch paginated data
+    /* ================= FETCH DATA ================= */
     let pageNo = 1;
-    let allRecords = [];
+    let finalRows = [];
 
     while (true) {
-      const response = await page.request.post(
+      const res = await page.request.post(
         `https://svform.urbanriseprojects.in/leadList?page=${pageNo}`,
         {
           headers: {
@@ -84,38 +76,48 @@ if (!EMAIL || !PASSWORD || !VIASOCKET_WEBHOOK) {
         }
       );
 
-      if (!response.ok()) {
-        throw new Error(`API failed on page ${pageNo}`);
+      const json = await res.json();
+      const rows = Object.values(json.data || {});
+
+      for (const r of rows) {
+        finalRows.push({
+          recent_site_visit_date: normalize(r.recent_date), // UI column
+          name: normalize(r.first_name),
+          contact: normalize(r.contact), // full number (UI masks it)
+          lead_source: normalize(r.lead_source),
+          lead_sub_source: normalize(r.lead_sub_source),
+          lead_stage: normalize(r.lead_stage),
+          lead_number: normalize(r.lead_number),
+          status: normalize(r.status),
+          created_at: normalize(r.created_at),
+          updated_at: normalize(r.updated_at),
+          total_time: normalize(r.total_time),
+          site_visit_count: normalize(r.site_visit_count),
+          is_qr: normalize(r.is_qr),
+          raw_lead_id: normalize(r.lead_id) // keep for reference
+        });
       }
-
-      const json = await response.json();
-      const records = Object.values(json.data || {});
-
-      allRecords.push(...records);
 
       if (!json.next_page_url) break;
       pageNo++;
     }
 
-    // 8️⃣ Send to Viasocket
+    /* ================= SEND TO VIASOCKET ================= */
     await fetch(VIASOCKET_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source: "urbanrise_portal",
         fetched_at: new Date().toISOString(),
-        total_records: allRecords.length,
-        records: allRecords
+        total_records: finalRows.length,
+        records: finalRows
       })
     });
 
-    console.log(`✅ Sent ${allRecords.length} records to Viasocket`);
+    console.log(`✅ Sent ${finalRows.length} records to Viasocket`);
   } catch (err) {
-    console.error("❌ Scraper failed:", err.message);
-
-    // Screenshot for debugging if login fails
+    console.error("❌ ERROR:", err.message);
     await page.screenshot({ path: "error.png", fullPage: true });
-
     throw err;
   } finally {
     await browser.close();
