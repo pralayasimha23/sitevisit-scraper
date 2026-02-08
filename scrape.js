@@ -23,7 +23,7 @@ console.log("⏱ LAST_CREATED_AT:", LAST_CREATED_AT);
 
 /* ================= HELPERS ================= */
 
-// UI uses MM/DD/YYYY
+// UI expects MM/DD/YYYY
 const formatDate = (d) => {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
@@ -31,12 +31,13 @@ const formatDate = (d) => {
   return `${mm}/${dd}/${yyyy}`;
 };
 
-// last 30 days
+// 🔁 Rolling last 6 months
+const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
 const DATE_FILTER = `${formatDate(
-  new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+  new Date(Date.now() - SIX_MONTHS_MS)
 )} - ${formatDate(new Date())}`;
 
-console.log("📅 DATE_FILTER:", DATE_FILTER);
+console.log("📅 DATE_FILTER (6 months):", DATE_FILTER);
 
 const normalize = (v) => {
   if (v === null || v === undefined) return "";
@@ -59,7 +60,6 @@ const normalize = (v) => {
     });
 
     await page.waitForSelector('input[type="password"]', { timeout: 60000 });
-
     await page.fill('input[type="email"], input[name="email"]', EMAIL);
     await page.fill('input[type="password"]', PASSWORD);
     await page.waitForTimeout(1500);
@@ -108,7 +108,7 @@ const normalize = (v) => {
       console.log(`📄 Page ${pageNo}: ${rows.length} records`);
 
       for (const r of rows) {
-        // 🔑 INCREMENTAL FILTER
+        // 🔑 Incremental filter
         if (r.created_at > LAST_CREATED_AT) {
           newRecords.push({
             recent_site_visit_date: normalize(r.recent_date),
@@ -142,6 +142,7 @@ const normalize = (v) => {
       body: JSON.stringify({
         meta: {
           source: "urbanrise_portal",
+          mode: "hourly_incremental_6_month_backfill",
           date_filter: DATE_FILTER,
           previous_cursor: LAST_CREATED_AT,
           new_records: newRecords.length
@@ -152,7 +153,7 @@ const normalize = (v) => {
 
     console.log("🚀 Sent new records to Viasocket");
 
-    /* ===== UPDATE CURSOR FILE ===== */
+    /* ===== UPDATE CURSOR ===== */
     const newestCreatedAt = newRecords
       .map(r => r.created_at)
       .sort()
