@@ -1,18 +1,25 @@
 import { chromium } from "playwright";
 import fetch from "node-fetch";
+import fs from "fs";
 
-/* ================= ENV ================= */
+/* ================= CONFIG ================= */
 const EMAIL = process.env.PORTAL_EMAIL;
 const PASSWORD = process.env.PORTAL_PASSWORD;
 const VIASOCKET_WEBHOOK = process.env.VIASOCKET_WEBHOOK;
-const LAST_CREATED_AT =
-  process.env.LAST_CREATED_AT || "1970-01-01 00:00:00";
 
 if (!EMAIL || !PASSWORD || !VIASOCKET_WEBHOOK) {
-  throw new Error("Missing required environment variables");
+  throw new Error("❌ Missing environment variables");
 }
 
-console.log("🔐 LAST_CREATED_AT:", LAST_CREATED_AT);
+/* ================= CURSOR ================= */
+let LAST_CREATED_AT = "1970-01-01 00:00:00";
+
+if (fs.existsSync("cursor.json")) {
+  const cursor = JSON.parse(fs.readFileSync("cursor.json", "utf8"));
+  LAST_CREATED_AT = cursor.last_created_at || LAST_CREATED_AT;
+}
+
+console.log("⏱ LAST_CREATED_AT:", LAST_CREATED_AT);
 
 /* ================= HELPERS ================= */
 
@@ -52,6 +59,7 @@ const normalize = (v) => {
     });
 
     await page.waitForSelector('input[type="password"]', { timeout: 60000 });
+
     await page.fill('input[type="email"], input[name="email"]', EMAIL);
     await page.fill('input[type="password"]', PASSWORD);
     await page.waitForTimeout(1500);
@@ -123,7 +131,7 @@ const normalize = (v) => {
     console.log("🆕 NEW RECORDS FOUND:", newRecords.length);
 
     if (newRecords.length === 0) {
-      console.log("ℹ️ No new records. Exiting cleanly.");
+      console.log("ℹ️ No new records. Exiting.");
       return;
     }
 
@@ -135,25 +143,27 @@ const normalize = (v) => {
         meta: {
           source: "urbanrise_portal",
           date_filter: DATE_FILTER,
-          last_created_at: LAST_CREATED_AT,
-          total_new_records: newRecords.length
+          previous_cursor: LAST_CREATED_AT,
+          new_records: newRecords.length
         },
         records: newRecords
       })
     });
 
-    console.log("🚀 Sent to Viasocket");
+    console.log("🚀 Sent new records to Viasocket");
 
-    /* ===== UPDATE CURSOR ===== */
+    /* ===== UPDATE CURSOR FILE ===== */
     const newestCreatedAt = newRecords
       .map(r => r.created_at)
       .sort()
       .slice(-1)[0];
 
-    console.log("✅ NEW LAST_CREATED_AT:", newestCreatedAt);
+    fs.writeFileSync(
+      "cursor.json",
+      JSON.stringify({ last_created_at: newestCreatedAt }, null, 2)
+    );
 
-    // Pass value to GitHub Actions
-    console.log(`::set-output name=last_created_at::${newestCreatedAt}`);
+    console.log("✅ Cursor updated to:", newestCreatedAt);
 
   } catch (err) {
     console.error("❌ ERROR:", err.message);
