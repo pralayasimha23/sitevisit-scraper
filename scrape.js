@@ -1,25 +1,22 @@
 import { chromium } from "playwright";
 import fetch from "node-fetch";
-import fs from "fs";
 
 /* ================= ENV ================= */
 const EMAIL = process.env.PORTAL_EMAIL;
 const PASSWORD = process.env.PORTAL_PASSWORD;
 const VIASOCKET_WEBHOOK = process.env.VIASOCKET_WEBHOOK;
-
-console.log("🔧 ENV CHECK", {
-  PORTAL_EMAIL: !!EMAIL,
-  PORTAL_PASSWORD: !!PASSWORD,
-  VIASOCKET_WEBHOOK: !!VIASOCKET_WEBHOOK
-});
+const LAST_CREATED_AT =
+  process.env.LAST_CREATED_AT || "1970-01-01 00:00:00";
 
 if (!EMAIL || !PASSWORD || !VIASOCKET_WEBHOOK) {
-  throw new Error("❌ Missing environment variables");
+  throw new Error("Missing required environment variables");
 }
+
+console.log("🔐 LAST_CREATED_AT:", LAST_CREATED_AT);
 
 /* ================= HELPERS ================= */
 
-// IMPORTANT: UI uses MM/DD/YYYY
+// UI uses MM/DD/YYYY
 const formatDate = (d) => {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
@@ -27,14 +24,13 @@ const formatDate = (d) => {
   return `${mm}/${dd}/${yyyy}`;
 };
 
-// Last 30 days
-const startDate = formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
-const endDate = formatDate(new Date());
-const DATE_FILTER = `${startDate} - ${endDate}`;
+// last 30 days
+const DATE_FILTER = `${formatDate(
+  new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+)} - ${formatDate(new Date())}`;
 
 console.log("📅 DATE_FILTER:", DATE_FILTER);
 
-// Normalize values
 const normalize = (v) => {
   if (v === null || v === undefined) return "";
   if (typeof v === "object") return "";
@@ -44,67 +40,45 @@ const normalize = (v) => {
 /* ================= MAIN ================= */
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({
-    viewport: { width: 1280, height: 800 }
-  });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
-  let finalRows = [];
+  let newRecords = [];
 
   try {
-    /* ========= LOGIN ========= */
-    console.log("🔐 Opening portal...");
+    /* ===== LOGIN ===== */
     await page.goto("https://svform.urbanriseprojects.in/", {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
 
     await page.waitForSelector('input[type="password"]', { timeout: 60000 });
-
     await page.fill('input[type="email"], input[name="email"]', EMAIL);
     await page.fill('input[type="password"]', PASSWORD);
-
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1500);
 
     const loginBtn =
       (await page.$('button:has-text("Login")')) ||
-      (await page.$('button:has-text("Sign In")')) ||
       (await page.$('button'));
-
-    if (!loginBtn) throw new Error("❌ Login button not found");
 
     await loginBtn.click();
     await page.waitForLoadState("networkidle", { timeout: 60000 });
 
-    console.log("✅ Login successful");
+    console.log("✅ Logged in");
 
-    /* ========= COOKIES ========= */
+    /* ===== COOKIES ===== */
     const cookies = await page.context().cookies();
-    console.log("🍪 Cookies:", cookies.map(c => c.name));
-
     const xsrf = cookies.find(c => c.name === "XSRF-TOKEN");
     const session = cookies.find(c => c.name === "sv_forms_session");
 
-    if (!xsrf || !session) {
-      throw new Error("❌ Required auth cookies missing");
-    }
+    if (!xsrf || !session) throw new Error("Auth cookies missing");
 
     const XSRF_TOKEN = decodeURIComponent(xsrf.value);
     const SESSION = session.value;
 
-    /* ========= FETCH DATA ========= */
+    /* ===== FETCH DATA ===== */
     let pageNo = 1;
 
     while (true) {
-      console.log(`📡 Fetching page ${pageNo}`);
-
-      const apiPayload = {
-        searchBy: "contact",
-        dateFilter: DATE_FILTER,
-        project: 13
-      };
-
-      console.log("➡️ API PAYLOAD:", apiPayload);
-
       const res = await page.request.post(
         `https://svform.urbanriseprojects.in/leadList?page=${pageNo}`,
         {
@@ -113,78 +87,76 @@ const normalize = (v) => {
             "X-XSRF-TOKEN": XSRF_TOKEN,
             "Cookie": `XSRF-TOKEN=${XSRF_TOKEN}; sv_forms_session=${SESSION}`
           },
-          data: apiPayload
+          data: {
+            searchBy: "contact",
+            dateFilter: DATE_FILTER,
+            project: 13
+          }
         }
       );
 
-      console.log("⬅️ API STATUS:", res.status());
-
       const json = await res.json();
       const rows = Object.values(json.data || {});
-
-      console.log(`📦 Records on page ${pageNo}:`, rows.length);
-
-      if (rows.length && pageNo === 1) {
-        console.log("🧪 Sample record:", rows[0]);
-      }
+      console.log(`📄 Page ${pageNo}: ${rows.length} records`);
 
       for (const r of rows) {
-        finalRows.push({
-          recent_site_visit_date: normalize(r.recent_date),
-          name: normalize(r.first_name),
-          contact: normalize(r.contact),
-          lead_source: normalize(r.lead_source),
-          lead_sub_source: normalize(r.lead_sub_source),
-          lead_stage: normalize(r.lead_stage),
-          lead_number: normalize(r.lead_number),
-          created_at: normalize(r.created_at),
-          updated_at: normalize(r.updated_at)
-        });
+        // 🔑 INCREMENTAL FILTER
+        if (r.created_at > LAST_CREATED_AT) {
+          newRecords.push({
+            recent_site_visit_date: normalize(r.recent_date),
+            name: normalize(r.first_name),
+            contact: normalize(r.contact),
+            lead_source: normalize(r.lead_source),
+            lead_sub_source: normalize(r.lead_sub_source),
+            lead_stage: normalize(r.lead_stage),
+            lead_number: normalize(r.lead_number),
+            created_at: normalize(r.created_at),
+            updated_at: normalize(r.updated_at)
+          });
+        }
       }
 
       if (!json.next_page_url) break;
       pageNo++;
     }
 
-    console.log("📊 TOTAL RECORDS COLLECTED:", finalRows.length);
+    console.log("🆕 NEW RECORDS FOUND:", newRecords.length);
 
-    /* ========= SAVE PAYLOAD PREVIEW ========= */
-    const previewPayload = {
-      source: "urbanrise_portal",
-      date_filter: DATE_FILTER,
-      total_records: finalRows.length,
-      records: finalRows.slice(0, 5)
-    };
+    if (newRecords.length === 0) {
+      console.log("ℹ️ No new records. Exiting cleanly.");
+      return;
+    }
 
-    fs.writeFileSync(
-      "viasocket_payload_preview.json",
-      JSON.stringify(previewPayload, null, 2)
-    );
-
-    console.log("📝 Saved viasocket_payload_preview.json");
-
-    /* ========= SEND TO VIASOCKET ========= */
-    console.log("🚀 Sending data to Viasocket...");
-
-    const vsRes = await fetch(VIASOCKET_WEBHOOK, {
+    /* ===== SEND TO VIASOCKET ===== */
+    await fetch(VIASOCKET_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        source: "urbanrise_portal",
-        fetched_at: new Date().toISOString(),
-        date_filter: DATE_FILTER,
-        total_records: finalRows.length,
-        records: finalRows
+        meta: {
+          source: "urbanrise_portal",
+          date_filter: DATE_FILTER,
+          last_created_at: LAST_CREATED_AT,
+          total_new_records: newRecords.length
+        },
+        records: newRecords
       })
     });
 
-    console.log("📬 Viasocket status:", vsRes.status);
-    console.log("📬 Viasocket response:", await vsRes.text());
+    console.log("🚀 Sent to Viasocket");
 
-    console.log("✅ SCRIPT COMPLETED SUCCESSFULLY");
+    /* ===== UPDATE CURSOR ===== */
+    const newestCreatedAt = newRecords
+      .map(r => r.created_at)
+      .sort()
+      .slice(-1)[0];
+
+    console.log("✅ NEW LAST_CREATED_AT:", newestCreatedAt);
+
+    // Pass value to GitHub Actions
+    console.log(`::set-output name=last_created_at::${newestCreatedAt}`);
+
   } catch (err) {
-    console.error("❌ SCRIPT ERROR:", err.message);
-    await page.screenshot({ path: "error.png", fullPage: true });
+    console.error("❌ ERROR:", err.message);
     throw err;
   } finally {
     await browser.close();
