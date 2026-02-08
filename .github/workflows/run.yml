@@ -1,13 +1,12 @@
-name: Urbanrise Site Visit Incremental Sync
+name: Urbanrise Site Visit Hourly Sync
 
 permissions:
   contents: write
 
-
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
+    - cron: "0 * * * *"   # ⏱ Every 1 hour
 
 jobs:
   scrape:
