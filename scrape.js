@@ -45,15 +45,33 @@ const normalize = (v) => {
   return String(v).trim();
 };
 
+// ⏳ Poll for HttpOnly auth cookie (CORRECT WAY)
+async function waitForAuthCookie(context, timeoutMs = 60000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const cookies = await context.cookies();
+    const hasSession = cookies.some(
+      c => c.name === "sv_forms_session"
+    );
+
+    if (hasSession) return true;
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  throw new Error("Auth cookie not found after login");
+}
+
 /* ================= MAIN ================= */
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
   let newRecords = [];
 
   try {
-    /* ===== LOGIN (SPA SAFE) ===== */
+    /* ===== LOGIN ===== */
     await page.goto("https://svform.urbanriseprojects.in/", {
       waitUntil: "domcontentloaded",
       timeout: 60000
@@ -70,20 +88,19 @@ const normalize = (v) => {
 
     await loginBtn.click();
 
-    // ✅ CRITICAL FIX: wait for auth cookie instead of networkidle
-    await page.waitForFunction(
-      () => document.cookie.includes("sv_forms_session"),
-      { timeout: 60000 }
-    );
+    // ✅ CORRECT WAIT (HttpOnly safe)
+    await waitForAuthCookie(context);
 
-    console.log("✅ Login successful (cookie detected)");
+    console.log("✅ Login successful (session cookie detected)");
 
-    /* ===== COOKIES ===== */
-    const cookies = await page.context().cookies();
+    /* ===== READ COOKIES ===== */
+    const cookies = await context.cookies();
     const xsrf = cookies.find(c => c.name === "XSRF-TOKEN");
     const session = cookies.find(c => c.name === "sv_forms_session");
 
-    if (!xsrf || !session) throw new Error("Auth cookies missing");
+    if (!xsrf || !session) {
+      throw new Error("Required auth cookies missing");
+    }
 
     const XSRF_TOKEN = decodeURIComponent(xsrf.value);
     const SESSION = session.value;
@@ -113,7 +130,6 @@ const normalize = (v) => {
       console.log(`📄 Page ${pageNo}: ${rows.length} records`);
 
       for (const r of rows) {
-        // 🔑 Incremental dedupe
         if (r.created_at > LAST_CREATED_AT) {
           newRecords.push({
             recent_site_visit_date: normalize(r.recent_date),
