@@ -2,7 +2,7 @@ import { chromium } from "playwright";
 import fetch from "node-fetch";
 import fs from "fs";
 
-/* ================= CONFIG ================= */
+/* ================= ENV ================= */
 const EMAIL = process.env.PORTAL_EMAIL;
 const PASSWORD = process.env.PORTAL_PASSWORD;
 const VIASOCKET_WEBHOOK = process.env.VIASOCKET_WEBHOOK;
@@ -23,7 +23,7 @@ console.log("⏱ LAST_CREATED_AT:", LAST_CREATED_AT);
 
 /* ================= HELPERS ================= */
 
-// UI expects MM/DD/YYYY
+// Portal expects MM/DD/YYYY
 const formatDate = (d) => {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
@@ -53,7 +53,7 @@ const normalize = (v) => {
   let newRecords = [];
 
   try {
-    /* ===== LOGIN ===== */
+    /* ===== LOGIN (SPA SAFE) ===== */
     await page.goto("https://svform.urbanriseprojects.in/", {
       waitUntil: "domcontentloaded",
       timeout: 60000
@@ -62,16 +62,21 @@ const normalize = (v) => {
     await page.waitForSelector('input[type="password"]', { timeout: 60000 });
     await page.fill('input[type="email"], input[name="email"]', EMAIL);
     await page.fill('input[type="password"]', PASSWORD);
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
 
     const loginBtn =
       (await page.$('button:has-text("Login")')) ||
       (await page.$('button'));
 
     await loginBtn.click();
-    await page.waitForLoadState("networkidle", { timeout: 60000 });
 
-    console.log("✅ Logged in");
+    // ✅ CRITICAL FIX: wait for auth cookie instead of networkidle
+    await page.waitForFunction(
+      () => document.cookie.includes("sv_forms_session"),
+      { timeout: 60000 }
+    );
+
+    console.log("✅ Login successful (cookie detected)");
 
     /* ===== COOKIES ===== */
     const cookies = await page.context().cookies();
@@ -108,7 +113,7 @@ const normalize = (v) => {
       console.log(`📄 Page ${pageNo}: ${rows.length} records`);
 
       for (const r of rows) {
-        // 🔑 Incremental filter
+        // 🔑 Incremental dedupe
         if (r.created_at > LAST_CREATED_AT) {
           newRecords.push({
             recent_site_visit_date: normalize(r.recent_date),
