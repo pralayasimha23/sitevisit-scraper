@@ -1,9 +1,9 @@
-name: Site Visit Scraper
+name: Urbanrise Incremental SV Sync
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 1 * * *"   # 7:00 AM IST
+    - cron: "*/15 * * * *"   # every 15 minutes
 
 jobs:
   scrape:
@@ -25,14 +25,18 @@ jobs:
         run: npx playwright install chromium
 
       - name: Run scraper
+        id: scrape
         run: npm start
         env:
           PORTAL_EMAIL: ${{ secrets.PORTAL_EMAIL }}
           PORTAL_PASSWORD: ${{ secrets.PORTAL_PASSWORD }}
           VIASOCKET_WEBHOOK: ${{ secrets.VIASOCKET_WEBHOOK }}
+          LAST_CREATED_AT: ${{ vars.LAST_CREATED_AT }}
 
-      - name: Upload payload preview
-        uses: actions/upload-artifact@v4
-        with:
-          name: viasocket-payload-preview
-          path: viasocket_payload_preview.json
+      - name: Update LAST_CREATED_AT
+        if: steps.scrape.outputs.last_created_at != ''
+        run: |
+          gh variable set LAST_CREATED_AT \
+            --body "${{ steps.scrape.outputs.last_created_at }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
